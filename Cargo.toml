@@ -1,10 +1,17 @@
 [package]
 name = "mdzk-language-server"
 version = "0.1.0"
+authors = ["Knut Magnus Aasrud <km@aasrud.com>"]
+description = "Language server for mdzk"
+homepage = "https://mdzk.app"
+repository = "https://github.com/mdzk-rs/mdzk-language-server"
+readme = "README.md"
+license = "LICENSE"
 edition = "2021"
-
-# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
 [dependencies]
 mdzk = { git = "https://github.com/mdzk-rs/mdzk", branch = "main" }
 tower-lsp = "0.16.0"
+
+[profile.release]
+lto = true
