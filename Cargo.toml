@@ -1,0 +1,10 @@
+[package]
+name = "mdzk-language-server"
+version = "0.1.0"
+edition = "2021"
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+[dependencies]
+mdzk = { git = "https://github.com/mdzk-rs/mdzk", branch = "main" }
+tower-lsp = "0.16.0"
