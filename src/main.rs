@@ -51,7 +51,7 @@ impl LanguageServer for Backend {
                     hover_provider: Some(HoverProviderCapability::Simple(true)),
                     completion_provider: Some(CompletionOptions {
                         resolve_provider: Some(false),
-                        trigger_characters: Some(vec!["[[".to_owned()]),
+                        trigger_characters: Some(vec!["[".to_owned(), "#".to_owned()]),
                         all_commit_characters: None,
                         work_done_progress_options: Default::default(),
                     }),
@@ -75,6 +75,46 @@ impl LanguageServer for Backend {
         self.client
             .log_message(MessageType::INFO, "mdzk-language-server initialized!")
             .await;
+    }
+
+    async fn completion(&self, params: CompletionParams) -> Result<Option<CompletionResponse>> {
+        let state = self.state.read().await;
+
+        if let Some(context) = params.context {
+            let complete_note = match context {
+                CompletionContext {
+                    trigger_kind: CompletionTriggerKind::INVOKED,
+                    trigger_character: _,
+                } => false,
+
+                CompletionContext {
+                    trigger_kind: CompletionTriggerKind::TRIGGER_CHARACTER,
+                    trigger_character: Some(c),
+                } if c == "[" => true,
+
+                _ => false,
+            };
+
+            if complete_note {
+                return Ok(Some(CompletionResponse::Array(
+                    state.vault.as_ref().unwrap().iter().map(|(_, note)| {
+                        CompletionItem {
+                            label: note.title.clone(),
+                            detail: note.path.as_ref().map(|p| p.to_string_lossy().to_string()),
+                            documentation: Some(Documentation::MarkupContent(MarkupContent {
+                                kind: MarkupKind::Markdown,
+                                value: note.content.clone(),
+                            })),
+                            kind: Some(CompletionItemKind::FILE),
+                            insert_text: Some(format!("{}]]", note.title)),
+                            ..Default::default()
+                        }
+                    }).collect()
+                )))
+            }
+        }
+
+        Ok(None)
     }
 
     async fn did_create_files(&self, _: CreateFilesParams) {
