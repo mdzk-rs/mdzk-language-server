@@ -11,6 +11,7 @@ edition = "2021"
 
 [dependencies]
 mdzk = { git = "https://github.com/mdzk-rs/mdzk", branch = "main" }
+thiserror = "1.0.30"
 tokio = { version = "1.17", features = ["fs", "io-std", "macros", "rt-multi-thread"] }
 tower-lsp = "0.16.0"
 

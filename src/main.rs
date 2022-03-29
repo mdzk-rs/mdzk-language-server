@@ -1,13 +1,16 @@
+mod error;
+use error::Error;
+
 use mdzk::{Vault, VaultBuilder};
 use std::{path::PathBuf, sync::Arc};
-use tokio::sync::RwLock;
-use tower_lsp::jsonrpc::{Result, Error, ErrorCode};
+use tokio::sync::{RwLock, RwLockWriteGuard};
+use tower_lsp::jsonrpc::{ErrorCode, Result};
 use tower_lsp::lsp_types::*;
-use tower_lsp::{Client, LspService, Server, LanguageServer};
+use tower_lsp::{Client, LanguageServer, LspService, Server};
 
 #[derive(Default)]
 struct State {
-    current_text: String,
+    current_ident: String,
     root: Option<PathBuf>,
     vault: Option<Vault>,
 }
@@ -24,52 +27,64 @@ impl Backend {
             state: Arc::new(RwLock::new(State::default())),
         }
     }
+
+    async fn update_vault(
+        &self,
+        state: &mut RwLockWriteGuard<'_, State>,
+    ) -> std::result::Result<(), Error> {
+        state.vault = Some(
+            VaultBuilder::default()
+                .source(state.root.as_ref().unwrap())
+                .build()?,
+        );
+
+        Ok(())
+    }
 }
 
 #[tower_lsp::async_trait]
 impl LanguageServer for Backend {
     async fn initialize(&self, params: InitializeParams) -> Result<InitializeResult> {
         if let Some(root) = params.root_uri {
-            let mut state = self.state.write().await;
+            if let Ok(root) = root.to_file_path() {
+                let mut state = self.state.write().await;
 
-            state.root = Some(root.to_file_path().unwrap()); // FIXME: Handle error
-            state.vault = Some(VaultBuilder::default()
-                .source(state.root.as_ref().unwrap())
-                .build()
-                .unwrap()); // FIXME: Handle error
+                state.root = Some(root);
+                self.update_vault(&mut state).await?;
 
-            Ok(InitializeResult {
-                server_info: Some(ServerInfo {
-                    name: "mdzk-language-server".to_owned(),
-                    version: Some(env!("CARGO_PKG_VERSION").to_owned()),
-                }),
-
-                capabilities: ServerCapabilities {
-                    text_document_sync: Some(
-                        // TODO: Investigate TextDocumentSyncKind::INCREMENTAL
-                        TextDocumentSyncCapability::Kind(TextDocumentSyncKind::FULL)
-                    ),
-                    hover_provider: Some(HoverProviderCapability::Simple(true)),
-                    completion_provider: Some(CompletionOptions {
-                        resolve_provider: Some(false),
-                        trigger_characters: Some(vec!["[".to_owned(), "#".to_owned()]),
-                        all_commit_characters: None,
-                        work_done_progress_options: Default::default(),
+                return Ok(InitializeResult {
+                    server_info: Some(ServerInfo {
+                        name: "mdzk-language-server".to_owned(),
+                        version: Some(env!("CARGO_PKG_VERSION").to_owned()),
                     }),
-                    document_link_provider: Some(DocumentLinkOptions {
-                        resolve_provider: Some(false),
-                        work_done_progress_options: Default::default(),
-                    }),
-                    ..Default::default()
-                },
-            })
-        } else {
-            Err(Error {
-                code: ErrorCode::InternalError,
-                message: "mdzk-language-server needs a workspace to load a vault".to_owned(),
-                data: None,
-            })
+
+                    capabilities: ServerCapabilities {
+                        text_document_sync: Some(
+                            // TODO: Investigate TextDocumentSyncKind::INCREMENTAL
+                            TextDocumentSyncCapability::Kind(TextDocumentSyncKind::INCREMENTAL),
+                        ),
+                        hover_provider: Some(HoverProviderCapability::Simple(true)),
+                        completion_provider: Some(CompletionOptions {
+                            resolve_provider: Some(false),
+                            trigger_characters: Some(vec!["[".to_owned(), "#".to_owned()]),
+                            all_commit_characters: None,
+                            work_done_progress_options: Default::default(),
+                        }),
+                        document_link_provider: Some(DocumentLinkOptions {
+                            resolve_provider: Some(false),
+                            work_done_progress_options: Default::default(),
+                        }),
+                        ..Default::default()
+                    },
+                });
+            }
         }
+
+        Err(tower_lsp::jsonrpc::Error {
+            code: ErrorCode::InternalError,
+            message: "mdzk-language-server needs a workspace to load a vault".to_owned(),
+            data: None,
+        })
     }
 
     async fn initialized(&self, _: InitializedParams) {
@@ -78,50 +93,31 @@ impl LanguageServer for Backend {
             .await;
     }
 
-    async fn completion(&self, params: CompletionParams) -> Result<Option<CompletionResponse>> {
+    async fn completion(&self, _: CompletionParams) -> Result<Option<CompletionResponse>> {
         let state = self.state.read().await;
 
-        if let Some(context) = params.context {
-            let linen = params.text_document_position.position.line as usize;
-            let line = state.current_text.lines().nth(linen).unwrap_or_default();
+        let complete_note = state.current_ident == "[[";
 
-            let maybe_inside_link = match (line.rfind("[["), line.rfind("]]")) {
-                (Some(i), Some(j)) => i > j,
-                (Some(_), None) => true,
-                _ => false,
-            };
-
-            let complete_note = match context {
-                CompletionContext {
-                    trigger_kind: CompletionTriggerKind::INVOKED,
-                    trigger_character: _,
-                } if maybe_inside_link => true,
-
-                CompletionContext {
-                    trigger_kind: CompletionTriggerKind::TRIGGER_CHARACTER,
-                    trigger_character: Some(c),
-                } if (c == "[" && maybe_inside_link) => true,
-
-                _ => false,
-            };
-
-            if complete_note {
-                return Ok(Some(CompletionResponse::Array(
-                    state.vault.as_ref().unwrap().iter().map(|(_, note)| {
-                        CompletionItem {
-                            label: note.title.clone(),
-                            detail: note.path.as_ref().map(|p| p.to_string_lossy().to_string()),
-                            documentation: Some(Documentation::MarkupContent(MarkupContent {
-                                kind: MarkupKind::Markdown,
-                                value: note.content.clone(),
-                            })),
-                            kind: Some(CompletionItemKind::FILE),
-                            insert_text: Some(format!("{}]]", note.title)),
-                            ..Default::default()
-                        }
-                    }).collect()
-                )))
-            }
+        if complete_note {
+            return Ok(Some(CompletionResponse::Array(
+                state
+                    .vault
+                    .as_ref()
+                    .unwrap()
+                    .iter()
+                    .map(|(_, note)| CompletionItem {
+                        label: note.title.clone(),
+                        detail: note.path.as_ref().map(|p| p.to_string_lossy().to_string()),
+                        documentation: Some(Documentation::MarkupContent(MarkupContent {
+                            kind: MarkupKind::Markdown,
+                            value: note.content.clone(),
+                        })),
+                        kind: Some(CompletionItemKind::FILE),
+                        insert_text: Some(format!("{}]]", note.title)),
+                        ..Default::default()
+                    })
+                    .collect(),
+            )));
         }
 
         Ok(None)
@@ -129,16 +125,26 @@ impl LanguageServer for Backend {
 
     async fn did_change(&self, params: DidChangeTextDocumentParams) {
         let mut state = self.state.write().await;
-        state.current_text = params.content_changes[0].text.clone();
+        let current_char = params.content_changes[0].text.as_str();
+        match current_char {
+            " " | "" | "\n" | "\t" | "\r" => state.current_ident = String::new(),
+            c => state.current_ident.push_str(c),
+        }
     }
 
-    async fn did_create_files(&self, _: CreateFilesParams) {
-        // Create a new state (build vault again) whenever files are created
+    async fn did_save(&self, _: DidSaveTextDocumentParams) {
+        // Update vault on file save
         let mut state = self.state.write().await;
-        state.vault = Some(VaultBuilder::default()
-            .source(state.root.as_ref().unwrap())
-            .build()
-            .unwrap()); // FIXME: Handle error
+
+        if let Err(err) = self.update_vault(&mut state).await {
+            self.client
+                .log_message(MessageType::ERROR, err.to_string())
+                .await
+        };
+
+        self.client
+            .show_message(MessageType::INFO, "Rebuilt vault")
+            .await;
     }
 
     async fn shutdown(&self) -> Result<()> {
