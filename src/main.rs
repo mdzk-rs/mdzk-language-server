@@ -1,4 +1,5 @@
 mod error;
+mod utils;
 use error::Error;
 
 use mdzk::{Vault, VaultBuilder};
@@ -61,7 +62,11 @@ impl LanguageServer for Backend {
                     capabilities: ServerCapabilities {
                         text_document_sync: Some(
                             // TODO: Investigate TextDocumentSyncKind::INCREMENTAL
-                            TextDocumentSyncCapability::Kind(TextDocumentSyncKind::INCREMENTAL),
+                            TextDocumentSyncCapability::Options(TextDocumentSyncOptions{
+                                change: Some(TextDocumentSyncKind::INCREMENTAL),
+                                save: Some(TextDocumentSyncSaveOptions::Supported(true)),
+                                ..Default::default()
+                            }),
                         ),
                         hover_provider: Some(HoverProviderCapability::Simple(true)),
                         completion_provider: Some(CompletionOptions {
@@ -132,7 +137,7 @@ impl LanguageServer for Backend {
         }
     }
 
-    async fn did_save(&self, _: DidSaveTextDocumentParams) {
+    async fn did_save(&self, params: DidSaveTextDocumentParams) {
         // Update vault on file save
         let mut state = self.state.write().await;
 
@@ -140,11 +145,30 @@ impl LanguageServer for Backend {
             self.client
                 .log_message(MessageType::ERROR, err.to_string())
                 .await
+        } else {
+            let cur_uri = params.text_document.uri;
+            // FIXME: Handle errors
+            let cur_path = cur_uri.to_file_path().unwrap();
+            self.client.show_message(MessageType::INFO, format!("{:?}", cur_path)).await;
+            let cur_id = state.vault.as_ref().unwrap().id_of("Action").unwrap(); // temp
+            let cur_note = state.vault.as_ref().unwrap().get(&cur_id).unwrap();
+            self.client.publish_diagnostics(
+                cur_uri,
+                cur_note.invalid_internal_links
+                    .iter()
+                    .map(|(range, link_string)| {
+                        Diagnostic {
+                            severity: Some(DiagnosticSeverity::WARNING),
+                            source: Some("mdzk".to_owned()),
+                            message: format!("Missing link destination: {}", link_string),
+                            range: utils::range_to_lsp_range(range, &cur_note.content),
+                            ..Default::default()
+                        }
+                    })
+                    .collect(),
+                None
+            ).await;
         };
-
-        self.client
-            .show_message(MessageType::INFO, "Rebuilt vault")
-            .await;
     }
 
     async fn shutdown(&self) -> Result<()> {
