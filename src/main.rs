@@ -7,6 +7,7 @@ use tower_lsp::{Client, LspService, Server, LanguageServer};
 
 #[derive(Default)]
 struct State {
+    current_text: String,
     root: Option<PathBuf>,
     vault: Option<Vault>,
 }
@@ -81,16 +82,25 @@ impl LanguageServer for Backend {
         let state = self.state.read().await;
 
         if let Some(context) = params.context {
+            let linen = params.text_document_position.position.line as usize;
+            let line = state.current_text.lines().nth(linen).unwrap_or_default();
+
+            let maybe_inside_link = match (line.rfind("[["), line.rfind("]]")) {
+                (Some(i), Some(j)) => i > j,
+                (Some(_), None) => true,
+                _ => false,
+            };
+
             let complete_note = match context {
                 CompletionContext {
                     trigger_kind: CompletionTriggerKind::INVOKED,
                     trigger_character: _,
-                } => false,
+                } if maybe_inside_link => true,
 
                 CompletionContext {
                     trigger_kind: CompletionTriggerKind::TRIGGER_CHARACTER,
                     trigger_character: Some(c),
-                } if c == "[" => true,
+                } if (c == "[" && maybe_inside_link) => true,
 
                 _ => false,
             };
@@ -115,6 +125,11 @@ impl LanguageServer for Backend {
         }
 
         Ok(None)
+    }
+
+    async fn did_change(&self, params: DidChangeTextDocumentParams) {
+        let mut state = self.state.write().await;
+        state.current_text = params.content_changes[0].text.clone();
     }
 
     async fn did_create_files(&self, _: CreateFilesParams) {
